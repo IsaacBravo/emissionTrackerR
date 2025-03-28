@@ -2,9 +2,12 @@ Package: emissionTrackerR
 Title: Lightweight Emission Tracking for Experiments
 Version: 0.0.1
 Authors@R: 
-    person("Your", "Name", email = "you@example.com", role = c("aut", "cre"))
+    person("Isaac Bravo", "Isaac Bravo", email = "isaac.bravo.21@gmail.com", role = c("aut", "cre"))
 Description: Track carbon emissions for code experiments, with logging, metadata, and comparisons.
 Depends: R (>= 4.0.0)
-License: MIT
+License: MIT + file LICENSE
 Encoding: UTF-8
 LazyData: true
+RoxygenNote: 7.2.1
+Imports: jsonlite,countrycode, R6
+Suggests: randomForest

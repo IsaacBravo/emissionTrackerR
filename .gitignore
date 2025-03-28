@@ -2,3 +2,6 @@
 .Rhistory
 .RData
 .Ruserdata
+.emissions_log_comparative.csv
+.emissions_log_comparative.json
+.Test.R

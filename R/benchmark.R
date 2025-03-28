@@ -1,5 +1,5 @@
 #' Benchmark Emissions Across Multiple Methods
-#'
+#' 
 #' Runs each method and logs emissions, duration, and custom metadata.
 #'
 #' @param methods A named list of functions. Each function should return a performance metric (e.g. accuracy).
