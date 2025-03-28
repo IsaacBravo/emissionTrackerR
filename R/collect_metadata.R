@@ -3,12 +3,8 @@
 `%||%` <- function(x, y) if (!is.null(x)) x else y
 
 get_country_full_name <- function(iso_code) {
-  iso_map <- list(
-    "DE" = "Germany", "US" = "United States", "FR" = "France", "IT" = "Italy",
-    "GB" = "United Kingdom", "ES" = "Spain", "CN" = "China", "JP" = "Japan",
-    "IN" = "India", "BR" = "Brazil", "CA" = "Canada", "AU" = "Australia"
-  )
-  return(iso_map[[iso_code]] %||% iso_code)
+  full_name <- countrycode::countrycode(iso_code, origin = "iso2c", destination = "country.name")
+  return(full_name %||% iso_code)  # fallback to ISO code if lookup fails
 }
 
 get_geo_info <- function() {
