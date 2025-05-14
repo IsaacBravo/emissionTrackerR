@@ -211,6 +211,7 @@ estimate_used_ram_power <- function(total_ram_gb,
     )
   )
   
+  
   # Match system type safely
   system_type <- match.arg(system_type)
   
@@ -251,6 +252,117 @@ estimate_used_ram_power <- function(total_ram_gb,
   return(used_power)
 }
 
+
+
+# GET CPU POWER USAGE
+
+# 📘 CodeCarbon’s CPU Power Estimation Logic
+# cpu_power = TDP × CPU utilization fraction × number of active cores
+# energy = cpu_power × time (in hours)
+
+# Step 1: Define CPU Power Estimation Function in R
+
+estimate_cpu_power <- function(tdp_watts = 65, cpu_util_percent = 25, active_cores = 1) {
+  utilization_fraction <- cpu_util_percent / 100
+  power <- tdp_watts * utilization_fraction * active_cores
+  return(power)  # in watts
+}
+
+# Step 2: Calculate Energy Consumption (Wh or kWh)
+calculate_energy_kwh <- function(cpu_power_watts, duration_sec) {
+  duration_hours <- duration_sec / 3600
+  energy_kwh <- cpu_power_watts * duration_hours / 1000
+  return(energy_kwh)
+}
+
+# Step 3: Estimate CO₂ Emissions
+estimate_co2_emissions <- function(energy_kwh, carbon_intensity = 475) {
+  # CO₂ in grams
+  co2_grams <- energy_kwh * carbon_intensity
+  return(co2_grams)
+}
+
+get_cpu_info <- function() {
+  # Load required packages
+  if (!requireNamespace("benchmarkme", quietly = TRUE)) {
+    install.packages("benchmarkme")
+  }
+  library(benchmarkme)
+  
+  if (!requireNamespace("parallel", quietly = TRUE)) {
+    install.packages("parallel")
+  }
+  library(parallel)
+  
+  # CPU model and number of cores
+  cpu_info <- benchmarkme::get_cpu()
+  n_cores <- parallel::detectCores(logical = TRUE)
+  
+  # Try to get current CPU usage (Linux/Mac only)
+  cpu_usage <- tryCatch({
+    if (.Platform$OS.type == "unix") {
+      as.numeric(system("top -bn1 | grep 'Cpu(s)' | awk '{print $2 + $4}'", intern = TRUE))
+    } else if (.Platform$OS.type == "windows") {
+      "CPU usage not available on Windows via base R"
+    } else {
+      "Unsupported platform"
+    }
+  }, error = function(e) {
+    "CPU usage check failed"
+  })
+  
+  list(
+    model_name = cpu_info$model_name,
+    number_of_cores = n_cores,
+    cpu_benchmark = cpu_info$cpu_benchmark,
+    cpu_usage_percent = cpu_usage
+  )
+}
+
+get_cpu_tdp <- function() {
+  # Retrieve full CPU model name
+  full_model <- get_cpu_info()$model_name
+  
+  # Extract short model identifier (e.g., "i7-10750H")
+  short_model <- extract_cpu_model(full_model)
+  
+  # Match short model with TDP dataset
+  tdp_value <- cpu_tdp_table |> tibble::as_tibble() |> dplyr::filter(grepl(short_model, Name))|>
+    dplyr::mutate(TDP = as.numeric(TDP))
+  tdp_value <- tdp_value[1,2] 
+  
+  if (is.na(tdp_value)) {
+    warning("CPU model not found in the TDP dataset.")
+    return(NA)
+  }
+  
+  return(tdp_value)
+}
+
+extract_cpu_model <- function(full_name) {
+  # Extract something like "i7-10750H" or "Ryzen 7 5800X"
+  pattern <- "(i[3579]-\\d{4,5}[A-Z]*)|(Ryzen [579] \\d{4}X?)"
+  match <- regmatches(full_name, regexpr(pattern, full_name, perl = TRUE))
+  if (length(match) == 0) return(NA)
+  return(match)
+}
+
+get_cpu_usage_windows <- function() {
+  command <- 'powershell -command "Get-CimInstance Win32_Processor | Measure-Object -Property LoadPercentage -Average | Select -ExpandProperty Average"'
+  usage <- tryCatch({
+    cpu_usage <- as.numeric(system(command, intern = TRUE))
+    return(cpu_usage)
+  }, error = function(e) {
+    return(NA)
+  })
+  
+  return(cpu_usage)
+}
+
+cpu_tdp_table <- read.csv("./cpu_power.csv", stringsAsFactors = FALSE)
+
+
+
 #' Collect Emissions Metadata
 #'
 #' Aggregates metadata about an experiment run, including timestamp, duration,
@@ -273,6 +385,14 @@ collect_metadata <- function(duration, emissions, project_name = "codecarbon", .
   run_id <- paste0(sample(c(0:9, letters), 20, replace = TRUE), collapse = "")
   emissions_rate <- emissions / duration
 
+  # CPU Power Estimation
+  cpu_info <- get_cpu_info()
+  tdp <- get_cpu_tdp()
+  cpu_util_percent <- ifelse(is.numeric(cpu_info$cpu_usage_percent), cpu_info$cpu_usage_percent, 25)
+  active_cores <- 1  # adjust as needed
+  cpu_power <- estimate_cpu_power(tdp_watts = tdp, cpu_util_percent = cpu_util_percent, active_cores = active_cores)
+  
+  # RAM Power Estimation
   ram_data <- get_windows_ram_info()
   ram_power_in_use <- estimate_used_ram_power(
     total_ram_gb = ram_data$total_ram_gb,
@@ -302,8 +422,6 @@ collect_metadata <- function(duration, emissions, project_name = "codecarbon", .
   #   }
   # }
 
-  
-  cpu_power <- 45.0
   ram_power <- ram_power_in_use
   gpu_power <- 0.0
 
