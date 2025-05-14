@@ -9,5 +9,5 @@ License: MIT + file LICENSE
 Encoding: UTF-8
 LazyData: true
 RoxygenNote: 7.2.1
-Imports: jsonlite,countrycode, R6
+Imports: jsonlite,countrycode, R6, tibble
 Suggests: randomForest
