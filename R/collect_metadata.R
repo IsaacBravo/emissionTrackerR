@@ -78,6 +78,178 @@ calculate_equivalents <- function(emissions_kg) {
   )
 }
 
+#' Collect RAM Information on Windows
+#'
+#' Retrieves detailed RAM information specific to Windows OS.
+get_windows_ram_info <- function() {
+  if (.Platform$OS.type == "windows") {
+    ram_info <- list()
+    
+    # Function to safely execute wmic command and get output
+    run_wmic <- function(command) {
+      result <- tryCatch({
+        system(command, intern = TRUE, ignore.stderr = TRUE)
+      }, error = function(e) {
+        warning(paste("Error executing command:", command, "-", e$message))
+        return(NULL)
+      })
+      if (!is.null(attr(result, "status")) && attr(result, "status") != 0) {
+        warning(paste("Command failed:", command, "- Exit code:", attr(result, "status")))
+        return(NULL)
+      }
+      return(result)
+    }
+    
+    # Total Physical Memory
+    total_mem_output <- run_wmic("wmic ComputerSystem get TotalPhysicalMemory")
+    if (!is.null(total_mem_output)) {
+      total_mem_line <- grep("[0-9]+", total_mem_output, value = TRUE)
+      if (length(total_mem_line) > 0) {
+        ram_info$total_ram_bytes <- as.numeric(trimws(total_mem_line))
+        ram_info$total_ram_gb <- ram_info$total_ram_bytes / (1024^3)
+      }
+    }
+    
+    # Available Physical Memory
+    available_mem_output <- run_wmic("wmic OS get FreePhysicalMemory")
+    if (!is.null(available_mem_output)) {
+      free_ram_line <- grep("[0-9]+", available_mem_output, value = TRUE)
+      if (length(free_ram_line) > 0) {
+        ram_info$free_ram_bytes <- as.numeric(trimws(free_ram_line)) * 1024
+        ram_info$free_ram_gb <- ram_info$free_ram_bytes / (1024^3)
+      }
+    }
+    
+    # Total Memory Slots
+    # memory_slot_output <- run_wmic("wmic ComputerSystem get NumberOfMemorySlots")
+    # Total Memory Slots (fallback using PowerShell)
+    memory_slot_output <- run_wmic(
+      'powershell -command "(Get-CimInstance -ClassName Win32_PhysicalMemoryArray).MemoryDevices"'
+    )
+    if (!is.null(memory_slot_output)) {
+      total_slots_line <- grep("[0-9]+", memory_slot_output, value = TRUE)
+      if (length(total_slots_line) > 0) {
+        ram_info$total_memory_slots <- as.numeric(trimws(total_slots_line))
+      }
+    }
+    
+    # Get details of each memory chip and its bank label (slot)
+    memory_chip_details_output <- run_wmic("wmic memorychip get BankLabel, Capacity")
+    ram_info$used_memory_slots_count <- NA # Initialize
+    
+    if (!is.null(memory_chip_details_output)) {
+      used_slots <- character(0)
+      for (line in memory_chip_details_output) {
+        if (grepl("BANK", line)) {
+          parts <- trimws(strsplit(line, "\\s+")[[1]])
+          if (length(parts) >= 2 && parts[1] == "BANK") {
+            bank_label <- parts[1]
+            if (!bank_label %in% used_slots) {
+              used_slots <- c(used_slots, bank_label)
+            }
+          }
+        } else if (grepl("Channel", line) && grepl("DIMM", line)) {
+          bank_label <- trimws(strsplit(line, "\\s+")[[1]][1])
+          if (!bank_label %in% used_slots) {
+            used_slots <- c(used_slots, bank_label)
+          }
+        }
+      }
+      ram_info$used_memory_slots_count <- length(used_slots)
+    }
+    
+    return(ram_info)
+  } else {
+    cat("This function is designed for Windows.\n")
+    return(NULL)
+  }
+}
+
+
+# RAM power estimation logic
+estimate_used_ram_power <- function(total_ram_gb,
+                                    free_ram_gb,
+                                    used_memory_slots = NA,
+                                    system_type = c("Desktop", "Laptop")) {
+  # RAM Power Consumption = 5 Watts * Number of RAM slots used
+  ram_power_table <- tibble::tibble(
+    system_type = c(
+      "Laptop", "Laptop", "Laptop",
+      "Desktop", "Desktop", "Desktop", "Desktop",
+      "Desktop", "Server", "Server", "Server",
+      "Server", "Server", "Server"
+    ),
+    total_ram_gb = c(
+      4, 8, 16,
+      16, 32, 64, 128,
+      128, 256, 512, 1024,
+      1024, 2048, 2048
+    ),
+    estimated_dimms = c(
+      1, 2, 2,
+      2, 4, 4, 4,
+      8, 8, 8, 8,
+      16, 16, 24
+    ),
+    power_per_dimm_w = c(
+      5.0, 5.0, 5.0,
+      5.0, 5.0, 5.0, 5.0,
+      4.5, 4.5, 4.5, 4.5,
+      4.0, 4.0, 3.5
+    ),
+    scaling_factor = c(
+      1.00, 1.00, 1.00,
+      1.00, 1.00, 1.00, 1.00,
+      0.90, 0.90, 0.90, 0.90,
+      0.80, 0.80, 0.70
+    ),
+    estimated_ram_power_w = c(
+      5, 10, 10,
+      10, 20, 20, 20,
+      36, 36, 36, 36,
+      64, 64, 84
+    )
+  )
+  
+  # Match system type safely
+  system_type <- match.arg(system_type)
+  
+  # Set max GB per DIMM based on system type
+  max_gb_per_dimm <- if (system_type == "Laptop") 16 else 32
+  
+  # Helper: DIMM scaling logic (CodeCarbon)
+  get_scaled_dimm_power <- function(index) {
+    if (index <= 4) return(5.0)
+    else if (index <= 8) return(5.0 * 0.9)
+    else if (index <= 16) return(5.0 * 0.8)
+    else return(5.0 * 0.7)
+  }
+  
+  estimate_dimm_count <- function(total_ram_gb, max_gb_per_dimm) {
+    if (is.na(total_ram_gb) || total_ram_gb <= 0) return(NA)
+    ceiling(total_ram_gb / max_gb_per_dimm)
+  }
+  
+  # Determine number of DIMMs
+  if (!is.na(used_memory_slots) && used_memory_slots > 0) {
+    n_dimms <- used_memory_slots
+  } else {
+    n_dimms <- estimate_dimm_count(total_ram_gb, max_gb_per_dimm)
+  }
+  
+  if (is.na(n_dimms)) return(NA)
+  
+  # Estimate total RAM power
+  total_power <- sum(sapply(1:n_dimms, get_scaled_dimm_power))
+  total_power <- max(total_power, 10)  # Minimum power for x86 systems
+  
+  # Scale by RAM usage ratio
+  used_ram_gb <- total_ram_gb - free_ram_gb
+  usage_ratio <- max(used_ram_gb / total_ram_gb, 0)
+  used_power <- round(total_power * usage_ratio, 2)
+  
+  return(used_power)
+}
 
 #' Collect Emissions Metadata
 #'
@@ -101,8 +273,38 @@ collect_metadata <- function(duration, emissions, project_name = "codecarbon", .
   run_id <- paste0(sample(c(0:9, letters), 20, replace = TRUE), collapse = "")
   emissions_rate <- emissions / duration
 
+  ram_data <- get_windows_ram_info()
+  ram_power_in_use <- estimate_used_ram_power(
+    total_ram_gb = ram_data$total_ram_gb,
+    free_ram_gb = ram_data$free_ram_gb,
+    used_memory_slots = ram_data$used_memory_slots_count,
+    system_type = "Laptop"
+  )
+  
+  # ram_power_in_use <- 4.0 # Default fallback
+  # 
+  # # Safely attempt runtime RAM power retrieval
+  # if (.Platform$OS.type == "windows") {
+  #   ram_data <- tryCatch(get_windows_ram_info(), error = function(e) NULL)
+  #   
+  #   if (!is.null(ram_data)) {
+  #     ram_power_estimate <- tryCatch(
+  #       estimate_used_ram_power(
+  #         total_ram_gb = ram_data$total_ram_gb,
+  #         free_ram_gb = ram_data$free_ram_gb,
+  #         used_memory_slots = ram_data$used_memory_slots_count,
+  #         system_type = "Laptop"
+  #       ),
+  #       error = function(e) NULL
+  #     )
+  #     
+  #     ram_power_in_use <- ram_power_estimate %||% ram_power_in_use
+  #   }
+  # }
+
+  
   cpu_power <- 45.0
-  ram_power <- 4.0
+  ram_power <- ram_power_in_use
   gpu_power <- 0.0
 
   cpu_energy <- (cpu_power * duration) / 3600
