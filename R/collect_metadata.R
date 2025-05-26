@@ -78,6 +78,7 @@ calculate_equivalents <- function(emissions_kg) {
   )
 }
 
+## RAM INFO
 #' Collect RAM Information on Windows
 #'
 #' Retrieves detailed RAM information specific to Windows OS.
@@ -164,6 +165,348 @@ get_windows_ram_info <- function() {
     return(NULL)
   }
 }
+
+## Hardcode RAM Solution
+# Get RAM Info on Linux (Dev)
+
+#' Get Essential RAM information on Ubuntu Linux (Simplified)
+#'
+#' Gathers total RAM, available RAM from /proc/meminfo.
+#' Optionally attempts to get memory slot counts using dmidecode.
+#' Note: dmidecode typically requires sudo privileges.
+#'
+#' @return A list containing RAM information (total_ram_gb, available_ram_gb,
+#'         used_memory_slots_count, total_memory_slots), with slot info
+#'         being NA if dmidecode fails or is unavailable.
+
+get_linux_ram_info <- function() {
+  if (.Platform$OS.type != "unix" || !file.exists("/proc/meminfo")) {
+    # message("This function is for Linux systems with /proc/meminfo.") # Optional message
+    return(NULL)
+  }
+  
+  ram_info <- list(
+    total_ram_bytes = NA_real_, total_ram_gb = NA_real_,
+    available_ram_bytes = NA_real_, available_ram_gb = NA_real_,
+    used_memory_slots_count = NA_integer_, total_memory_slots = NA_integer_
+  )
+  
+  # --- 1. Get Total and Available Memory from /proc/meminfo ---
+  tryCatch({
+    meminfo_lines <- readLines("/proc/meminfo")
+    
+    total_mem_line <- grep("^MemTotal:", meminfo_lines, value = TRUE)
+    if (length(total_mem_line) > 0) {
+      total_kb <- as.numeric(gsub("[^0-9]", "", total_mem_line))
+      if (!is.na(total_kb)) {
+        ram_info$total_ram_bytes <- total_kb * 1024
+        ram_info$total_ram_gb <- ram_info$total_ram_bytes / (1024^3)
+      }
+    }
+    
+    available_mem_line <- grep("^MemAvailable:", meminfo_lines, value = TRUE)
+    if (length(available_mem_line) > 0) {
+      available_kb <- as.numeric(gsub("[^0-9]", "", available_mem_line))
+      if (!is.na(available_kb)) {
+        ram_info$available_ram_bytes <- available_kb * 1024
+        ram_info$available_ram_gb <- ram_info$available_ram_bytes / (1024^3)
+      }
+    } else { # Basic fallback if MemAvailable is missing
+      free_mem_line <- grep("^MemFree:", meminfo_lines, value = TRUE)
+      if (length(free_mem_line) > 0) {
+        free_kb <- as.numeric(gsub("[^0-9]", "", free_mem_line))
+        # This is a very rough estimate of "available"
+        ram_info$available_ram_bytes <- free_kb * 1024 
+        ram_info$available_ram_gb <- (free_kb * 1024) / (1024^3)
+        # message("MemAvailable not found in /proc/meminfo; using MemFree as a rough proxy for available RAM.")
+      }
+    }
+  }, error = function(e) {
+    warning(paste("Could not read/parse /proc/meminfo:", e$message))
+  })
+  
+  # --- 2. Attempt to get slot information using dmidecode (optional) ---
+  run_dmi_command <- function(dmi_command_args) {
+    # Check if dmidecode command exists
+    if (Sys.which("dmidecode") == "") return(NULL) 
+    
+    # Try with sudo first, then without if that fails (common pattern for optional sudo)
+    # However, for true simplification, we might just try without and let user know.
+    # For this version, we'll just try one way and note that sudo might be needed.
+    
+    # We'll try "dmidecode" and if it fails (often due to permissions), it fails.
+    # The user would need to run the R script with sudo for dmidecode to work.
+    # We could add a `try_sudo = TRUE` argument to the main function if more control is needed.
+    
+    full_command <- paste("dmidecode", dmi_command_args)
+    # More direct: if user doesn't have sudo for R, this will likely get permission denied for dmidecode.
+    # This is simpler than trying sudo from within R, which is complex and risky.
+    output <- try(system(full_command, intern = TRUE, ignore.stderr = TRUE), silent = TRUE)
+    
+    if (inherits(output, "try-error") || (!is.null(attr(output, "status")) && attr(output, "status") != 0) ) {
+      # message(paste("dmidecode command '", full_command, "' failed or produced no output. Sudo might be required or dmidecode not fully functional.", sep=""))
+      return(NULL)
+    }
+    if (length(output) < 2) return(NULL) # Unlikely to be useful output
+    return(output)
+  }
+  
+  # Get number of installed memory modules (used slots)
+  dmi_mem_devices <- run_dmi_command("-t memory") # or -t 17
+  if (!is.null(dmi_mem_devices)) {
+    # Count actual modules, not just "Handle" lines for empty slots
+    size_lines <- grep("^\\s*Size:", dmi_mem_devices, value = TRUE, ignore.case = TRUE)
+    # Filter out "No Module Installed" or similar indications of empty slots
+    populated_size_lines <- size_lines[!grepl("No Module Installed|Not Installed|Empty", size_lines, ignore.case = TRUE)]
+    # Also filter out very small sizes that might indicate unpopulated but reported slots (e.g. "0 MB")
+    # This regex looks for a number followed by GB or MB (or KB, though less likely for Size)
+    meaningful_size_lines <- populated_size_lines[grepl("[1-9][0-9]*\\s*(MB|GB|KB)", populated_size_lines, ignore.case = TRUE)]
+    
+    if (length(meaningful_size_lines) > 0) {
+      ram_info$used_memory_slots_count <- length(meaningful_size_lines)
+    }
+  }
+  
+  # Get total number of memory slots
+  dmi_mem_array <- run_dmi_command("-t 16") # Physical Memory Array
+  if (!is.null(dmi_mem_array)) {
+    num_devices_lines <- grep("Number Of Devices:", dmi_mem_array, value = TRUE, ignore.case = TRUE)
+    if (length(num_devices_lines) > 0) {
+      total_slots <- sum(as.numeric(gsub("[^0-9]", "", num_devices_lines)), na.rm = TRUE)
+      if (total_slots > 0) ram_info$total_memory_slots <- total_slots
+    }
+  }
+  
+  # Final check and message if dmidecode parts failed
+  if (is.na(ram_info$used_memory_slots_count) && is.na(ram_info$total_memory_slots)) {
+    # Only message if BOTH are NA, suggesting dmidecode didn't work at all.
+    # message("Could not retrieve memory slot information. 'dmidecode' may not be installed, or R lacks permission (try running R with sudo).")
+  }
+  
+  return(ram_info)
+}
+
+
+ram_linux <- get_linux_ram_info()
+
+
+# RAPL Solution 
+read_sysfs_val <- function(filepath) {
+  if (!file.exists(filepath)) return(NA_real_)
+  tryCatch(as.numeric(readLines(filepath, n = 1, warn = FALSE)), error = function(e) NA_real_)
+}
+
+#' Start a simplified RAPL energy trace.
+#' Discovers domains by looking for 'subsystem' directories potentially nested
+#' under RAPL controllers (e.g., .../intel-rapl:0/intel-rapl:0:1/subsystem/).
+#' @return A list with 'start_time_POSIXct', 'initial_readings_uJ' (named list),
+#'         and 'domain_details' (named list with 'name_from_file', 'max_energy_uj').
+#'         Returns NULL on failure.
+start_rapl_trace_simple <- function() {
+  if (Sys.info()["sysname"] != "Linux") {
+    return(NULL)
+  }
+  
+  base_powercap_path <- "/sys/class/powercap/"
+  if (!dir.exists(base_powercap_path)) return(NULL)
+  
+  all_domains_config <- list()
+  
+  # 1. Find all top-level RAPL controllers (e.g., intel-rapl:0, amd_power:0)
+  top_level_controllers <- list.files(base_powercap_path,
+                                      pattern = "^(intel-rapl|amd_power|amd-rapl|tdp-rapl):[0-9]+$",
+                                      full.names = TRUE)
+  
+  paths_to_search_for_subsystem <- c()
+  
+  # Add top-level controllers themselves to the search list for a 'subsystem' dir
+  paths_to_search_for_subsystem <- c(paths_to_search_for_subsystem, top_level_controllers)
+  
+  # 2. For each top-level controller, find its direct sub-controllers (e.g., intel-rapl:0:0)
+  for (controller_path in top_level_controllers) {
+    sub_controllers <- list.files(controller_path,
+                                  pattern = paste0("^", basename(controller_path), ":[0-9]+$"),
+                                  full.names = TRUE)
+    paths_to_search_for_subsystem <- c(paths_to_search_for_subsystem, sub_controllers)
+  }
+  
+  paths_to_search_for_subsystem <- unique(paths_to_search_for_subsystem)
+  
+  
+  # 3. For each of these potential parent paths, check for a 'subsystem' directory
+  for (parent_path in paths_to_search_for_subsystem) {
+    subsystem_dir_path <- file.path(parent_path, "subsystem")
+    
+    if (dir.exists(subsystem_dir_path)) {
+      # 4. List all directories under .../subsystem/
+      # These are assumed to be the actual RAPL controller directories with energy_uj files
+      rapl_endpoint_dirs <- list.dirs(subsystem_dir_path, full.names = TRUE, recursive = FALSE)
+      
+      for (zone_path in rapl_endpoint_dirs) {
+        energy_file <- file.path(zone_path, "energy_uj")
+        name_file <- file.path(zone_path, "name")
+        
+        if (file.exists(energy_file) && file.exists(name_file)) {
+          raw_name <- tryCatch(trimws(readLines(name_file, n = 1, warn = FALSE)),
+                               error = function(e) basename(zone_path))
+          
+          # Create a unique ID from the relative path under /sys/class/powercap/ and the raw_name
+          relative_path_id <- gsub("/", "_", sub(paste0(base_powercap_path,"/?"), "", zone_path))
+          domain_id_candidate <- paste0(relative_path_id, "_", gsub("[^a-zA-Z0-9_]", "", raw_name))
+          
+          current_keys <- names(all_domains_config)
+          if(domain_id_candidate %in% current_keys) {
+            domain_id <- make.unique(c(current_keys, domain_id_candidate))[length(current_keys) + 1]
+          } else {
+            domain_id <- domain_id_candidate
+          }
+          
+          all_domains_config[[domain_id]] <- list(
+            path_to_energy_uj = energy_file,
+            name_from_file = raw_name,
+            max_energy_uj = read_sysfs_val(file.path(zone_path, "max_energy_range_uj"))
+          )
+        }
+      }
+    }
+  } # End loop over paths_to_search_for_subsystem
+  
+  if (length(all_domains_config) == 0) {
+    message("No RAPL domains found under any identified '[controller]/[sub-controller (optional)]/subsystem/' paths.")
+    return(NULL)
+  }
+  
+  initial_readings <- sapply(all_domains_config, function(d) read_sysfs_val(d$path_to_energy_uj), USE.NAMES = TRUE)
+  
+  valid_domains_idx <- !is.na(initial_readings)
+  if(sum(valid_domains_idx) == 0) {
+    message("Could not read any RAPL energy counters from discovered subsystem paths.")
+    return(NULL)
+  }
+  
+  return(list(
+    start_time_POSIXct = Sys.time(),
+    initial_readings_uJ = initial_readings[valid_domains_idx],
+    domain_details = all_domains_config[valid_domains_idx]
+  ))
+}
+
+#' Stop a simplified RAPL energy trace and report.
+#' (This function remains unchanged)
+stop_rapl_trace_simple <- function(start_data) {
+  if (is.null(start_data) || !all(c("start_time_POSIXct", "initial_readings_uJ", "domain_details") %in% names(start_data))) {
+    return(NULL)
+  }
+  end_time <- Sys.time()
+  final_readings_uJ <- sapply(start_data$domain_details, function(d) read_sysfs_val(d$path_to_energy_uj), USE.NAMES = TRUE)
+  duration_s <- as.numeric(difftime(end_time, start_data$start_time_POSIXct, units = "secs"))
+  report <- list()
+  for (domain_id in names(start_data$initial_readings_uJ)) {
+    start_uJ <- start_data$initial_readings_uJ[[domain_id]]
+    end_uJ <- final_readings_uJ[[domain_id]]
+    details <- start_data$domain_details[[domain_id]]
+    energy_J <- NA_real_
+    power_W <- NA_real_
+    if (!is.na(start_uJ) && !is.na(end_uJ)) {
+      delta_uJ <- end_uJ - start_uJ
+      if (!is.na(details$max_energy_uj) && details$max_energy_uj > 0 && delta_uJ < 0) {
+        delta_uJ <- delta_uJ + details$max_energy_uj
+      }
+      energy_J <- delta_uJ / 1e6
+      power_W <- if (duration_s > 1e-9) energy_J / duration_s else NA_real_
+    }
+    report[[domain_id]] <- list(
+      original_name = details$name_from_file,
+      energy_J = energy_J,
+      power_W = power_W
+    )
+  }
+  return(list(
+    start_time = start_data$start_time_POSIXct,
+    end_time = end_time,
+    duration_s = duration_s,
+    report_per_domain = report
+  ))
+}
+
+#' Wrap an R expression with simplified RAPL snapshot energy tracing.
+#' (This function remains unchanged)
+with_rapl_trace_simple <- function(expr) {
+  initial_trace_state <- start_rapl_trace_simple()
+  if (is.null(initial_trace_state)) {
+    eval_result <- eval.parent(substitute(expr))
+    return(list(result = eval_result, energy_summary = NULL))
+  }
+  cat(sprintf("RAPL tracing started for %d domain(s) from identified subsystem paths.\n", length(initial_trace_state$initial_readings_uJ)))
+  eval_outcome <- tryCatch({
+    list(result = eval.parent(substitute(expr)), error = NULL)
+  }, error = function(e) {
+    list(result = NULL, error = e)
+  })
+  final_energy_report <- stop_rapl_trace_simple(initial_trace_state)
+  cat("RAPL tracing stopped.\n")
+  if (!is.null(eval_outcome$error)) {
+    message("Error during traced expression. Energy data collected up to the error.")
+  }
+  return(list(
+    result = eval_outcome$result,
+    error_details = eval_outcome$error,
+    energy_summary = final_energy_report
+  ))
+}
+
+# Test 
+cpu_intensive_task <- function(iterations = 1e7, use_matrix_ops = TRUE) {
+  cat(sprintf("Starting CPU-intensive task with %s iterations...\n", format(iterations, scientific = FALSE)))
+  
+  # Some arithmetic operations
+  result <- 0
+  for (i in 1:iterations) {
+    result <- result + log(sqrt(as.numeric(i) + 0.5)) / (as.numeric(i) + 1.1)
+    if (i %% (iterations/10) == 0) {
+      cat(".") # Progress indicator
+    }
+  }
+  cat("\n")
+  
+  if (use_matrix_ops) {
+    cat("Performing some matrix operations...\n")
+    # Create moderately sized matrices
+    mat_size <- min(500, floor(sqrt(iterations/100))) 
+    if(mat_size < 10) mat_size <- 10 # ensure a minimum size
+    
+    A <- matrix(rnorm(mat_size*mat_size), nrow = mat_size)
+    B <- matrix(rnorm(mat_size*mat_size), nrow = mat_size)
+    
+    # Perform a few matrix multiplications
+    for(j in 1:3) {
+      C <- A %*% B
+      A <- B # Swap to do something slightly different next time
+      B <- C[,1:mat_size] # Ensure B remains square
+    }
+    # Add something from matrix ops to the result to ensure it's used
+    result <- result + sum(diag(C), na.rm = TRUE) 
+  }
+  
+  cat("CPU-intensive task finished.\n")
+  return(result)
+}
+
+num_iterations <- 100 # Example: 8 million iterations
+
+cat("\n--- Starting RAPL Trace for cpu_intensive_task ---\n")
+trace_results <- with_rapl_trace_simple({
+  # This is the code block that will be monitored
+  task_output <- cpu_intensive_task(iterations = num_iterations, use_matrix_ops = TRUE)
+  task_output # The wrapper will return this as 'result'
+})
+
+
+
+  
+  
+
+
 
 
 # RAM power estimation logic
